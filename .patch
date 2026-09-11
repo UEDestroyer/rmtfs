@@ -1,0 +1,112 @@
+diff --git a/rmtfs.c b/rmtfs.c
+index 1111111..2222222 100644
+--- a/rmtfs.c
++++ b/rmtfs.c
+@@ -30,6 +30,7 @@
+ #include <string.h>
+ #include <sys/mman.h>
+ #include <sys/stat.h>
++#include <sys/system_properties.h>
+ #include <unistd.h>
+ 
+ #include "qmi_rmts.h"
+@@ -40,6 +41,13 @@
+ #define RMTFS_MEM_SIZE (64 * SECTOR_SIZE)
+ 
+ #define RMTFS_MAX_CLIENTS 10
++
++#define QMI_RMTS_ODM_GET_SINGLE_SIM_TAG_REQ 7
++#define QMI_RMTS_ODM_GET_SINGLE_SIM_TAG_MAGIC 0x12345678
++
++#define RMTFS_SIM_TAG_SINGLE 1
++#define RMTFS_SIM_TAG_DUAL   2
++
++#define SINGLE_SIM_PROP "ro.miui.singlesim"
+ 
+ struct rmtfs_client {
+ 	int fd;
+@@ -50,6 +58,7 @@ struct rmtfs_client {
+ struct qmi_handle *qmi_rmtfs;
+ 
+ static struct rmtfs_client rmtfs_clients[RMTFS_MAX_CLIENTS];
++extern uint32_t rmtfs_client_magic[RMTFS_MAX_CLIENTS]; /* per-client magic, set on open */
+ 
+ static struct rmtfs_client *rmtfs_client_find(uint32_t handle)
+ {
+@@ -300,6 +309,72 @@ static void rmtfs_close_cb(struct qmi_handle *qmi, struct sockaddr_qrtr *sq,
+ 	qmi_send_response(qmi, sq, msg_id, &resp, sizeof(resp));
+ }
+ 
++struct rmts_odm_get_single_sim_tag_req {
++	uint32_t handle;
++};
++
++struct rmts_odm_get_single_sim_tag_resp {
++	uint32_t result;
++	uint32_t error;
++	uint8_t  tlv_type;
++	uint8_t  tlv_len;
++	uint8_t  single_sim_tag;
++	uint8_t  _pad;
++};
++
++static void rmtfs_odm_get_single_sim_tag_cb(struct qmi_handle *qmi,
++					     struct sockaddr_qrtr *sq,
++					     struct qmi_txn *txn,
++					     const void *data, size_t len)
++{
++	const struct rmts_odm_get_single_sim_tag_req *req = data;
++	struct rmts_odm_get_single_sim_tag_resp resp = {};
++	struct rmtfs_client *client;
++	char prop_val[PROP_VALUE_MAX] = {0};
++
++	if (len != sizeof(*req)) {
++		fprintf(stderr,
++			"[RMTFS] odm_get_single_sim_tag: bad request size %zu != %zu\n",
++			len, sizeof(*req));
++		resp.result = 1;
++		resp.error = 3; /* INVALID_ID */
++		goto send;
++	}
++
++	client = rmtfs_client_find(req->handle);
++	if (!client || rmtfs_client_magic[client - rmtfs_clients] !=
++			QMI_RMTS_ODM_GET_SINGLE_SIM_TAG_MAGIC) {
++		fprintf(stderr,
++			"[RMTFS] odm_get_single_sim_tag: invalid client handle 0x%x\n",
++			req->handle);
++		resp.result = 1;
++		resp.error = 3;
++		goto send;
++	}
++
++	resp.result = 0;
++	resp.error = 0;
++	resp.tlv_type = 0x01;
++	resp.tlv_len = 0x02;
++
++	__system_property_get(SINGLE_SIM_PROP, prop_val);
++	resp.single_sim_tag = (prop_val[0] == '1')
++				? RMTFS_SIM_TAG_SINGLE
++				: RMTFS_SIM_TAG_DUAL;
++
++send:
++	qmi_send_response(qmi, sq, QMI_RMTS_ODM_GET_SINGLE_SIM_TAG_REQ,
++			   &resp, sizeof(resp));
++}
++
+ static const struct qmi_msg_handler rmtfs_msg_handlers[] = {
+ 	{
+ 		.type = QMI_REQUEST,
+@@ -320,6 +395,13 @@ static const struct qmi_msg_handler rmtfs_msg_handlers[] = {
+ 		.ei = NULL,
+ 		.cb = rmtfs_alloc_buff_cb,
+ 	},
++	{
++		.type = QMI_REQUEST,
++		.msg_id = QMI_RMTS_ODM_GET_SINGLE_SIM_TAG_REQ,
++		.ei = NULL,
++		.cb = rmtfs_odm_get_single_sim_tag_cb,
++	},
+ 	{}
+ };
